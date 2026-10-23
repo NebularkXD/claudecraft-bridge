@@ -159,6 +159,20 @@ const ACTIONS = {
         return r.ok ? { ok: true, levelId: r.data[0].id } : { error: r.error };
     },
 
+    // Delete one of your own levels: the database only lets a level's creator do it
+    async deleteLevel({ id }) {
+        if (!store.get()) return { error: 'Log in first.' };
+        if (!/^[0-9a-f-]{36}$/.test(String(id))) return { error: 'No such level.' };
+        const r = await request('/rest/v1/levels?id=eq.' + id, { method: 'DELETE', headers: { Prefer: 'return=representation' } });
+        if (!r.ok) return { error: r.error };
+        if (!r.data || !r.data.length) return { error: 'You can only delete your own levels.' };
+        // then its files (the level and its thumbnail)
+        const gone = r.data[0];
+        await request('/storage/v1/object/levels', { method: 'DELETE', body: { prefixes: [gone.dat_path] } });
+        await request('/storage/v1/object/thumbs', { method: 'DELETE', body: { prefixes: [gone.thumb_path] } });
+        return { deleted: true };
+    },
+
     async visit({ id }) {
         let visitor = null;
         try { visitor = localStorage.getItem('claudecraft-visitor'); if (!visitor) { visitor = crypto.randomUUID(); localStorage.setItem('claudecraft-visitor', visitor); } } catch { visitor = crypto.randomUUID(); }
