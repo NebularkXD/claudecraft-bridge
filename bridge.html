@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claudecraft helper</title>
+</head>
+<body>
+<p>This is a helper for the Claudecraft website. There's nothing to see here.</p>
+<script>
+// ============================================================
+// CLAUDECRAFT HELPER (bridge)
+// claudecraft.neocities.org isn't allowed to connect to other sites, so it loads this page
+// invisibly and asks it to talk to the Claudecraft database (Supabase) instead: accounts,
+// skins, players, levels and visits. Only the Claudecraft website can use it.
+// The key below is Supabase's PUBLIC key, meant to be in web pages; the database's security
+// rules are what protect the data.
+// ============================================================
+const ALLOWED_SITES = ['https://claudecraft.neocities.org'];
+const SUPABASE_URL = 'https://cxnawngqpkiqsowcuroz.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_q1NbDiVu0tYT00ZJKArOjQ_VuRP_8tW';
+const SESSION_KEY = 'claudecraft-bridge-session';
+
+const store = {
+    get() { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } },
+    set(s) { try { if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s)); else localStorage.removeItem(SESSION_KEY); } catch { /* blocked */ } }
+};
+
+// A current access token for the logged-in player (refreshed when it's about to run out)
+async function token() {
+    const s = store.get();
+    if (!s) return null;
+    if (Date.now() / 1000 < s.expires_at - 60) return s.access_token;
+    try {
+        const res = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+            method: 'POST', headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: s.refresh_token })
+        });
+        if (!res.ok) { store.set(null); return null; }
+        const f = await res.json();
+        store.set({ ...s, access_token: f.access_token, refresh_token: f.refresh_token, expires_at: f.expires_at || Math.floor(Date.now() / 1000) + f.expires_in });
+        return f.access_token;
+    } catch { return s.access_token; }
+}
+
+// One request to Supabase. Returns { ok, status, data, error }.
+async function request(path, { method = 'GET', body, headers = {}, auth = true, binary = false } = {}) {
+    const h = { apikey: SUPABASE_KEY, ...headers };
+    const t = auth ? await token() : null;
+    if (t) h.Authorization = 'Bearer ' + t;
+    if (body !== undefined && !ArrayBuffer.isView(body)) { h['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
+    try {
+        const res = await fetch(SUPABASE_URL + path, { method, headers: h, body });
+        if (binary && res.ok) return { ok: true, status: res.status, data: new Uint8Array(await res.arrayBuffer()) };
+        const text = await res.text();
+        let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+        const error = res.ok ? null : (data && (data.msg || data.message || data.error_description || data.error)) || ('Error ' + res.status);
+        return { ok: res.ok, status: res.status, data, error };
+    } catch { return { ok: false, status: 0, data: null, error: 'Couldn\'t reach the Claudecraft database' }; }
+}
+const publicUrl = (bucket, path) => SUPABASE_URL + '/storage/v1/object/public/' + bucket + '/' + path;
+const toBase64 = bytes => { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000)); return btoa(s); };
+const fromBase64 = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+
+async function me() {
+    const s = store.get();
+    if (!s) return null;
+    const r = await request('/rest/v1/profiles?select=username,skin,is_owner&id=eq.' + s.user_id);
+    return r.ok && r.data[0] ? r.data[0] : (r.status === 401 ? (store.set(null), null) : { username: s.username || null });
+}
+async function startSession(d) {
+    store.set({ access_token: d.access_token, refresh_token: d.refresh_token, user_id: d.user.id,
+        expires_at: d.expires_at || Math.floor(Date.now() / 1000) + d.expires_in });
+    const user = await me();
+    if (user && user.username) store.set({ ...store.get(), username: user.username });
+    return user;
+}
+
+// ---- What the website can ask for ----
+const ACTIONS = {
+    async session() { return { user: await me() }; },
+
+    async register({ email, username, password }) {
+        const taken = await request('/rest/v1/profiles?select=id&username=ilike.' + encodeURIComponent(String(username).replace(/_/g, '\\_')), { auth: false });
+        if (taken.ok && taken.data.length) return { error: 'That username is already taken.' };
+        const r = await request('/auth/v1/signup', { method: 'POST', auth: false, body: { email, password, data: { username } } });
+        if (!r.ok) {
+            if (/already registered|already exists/i.test(r.error)) return { error: 'That email already has an account.' };
+            if (/database error/i.test(r.error)) return { error: 'That username is already taken.' };
+            if (/rate limit/i.test(r.error)) return { error: 'Too many sign-ups right now. Try again in an hour.' };
+            return { error: r.error };
+        }
+        if (r.data && r.data.access_token) return { user: await startSession(r.data) };
+        return { message: 'Almost done! Check your email and click the link to confirm your account, then log in.' };
+    },
+
+    async login({ email, password }) {
+        const r = await request('/auth/v1/token?grant_type=password', { method: 'POST', auth: false, body: { email, password } });
+        if (!r.ok) return { error: /not confirmed/i.test(r.error) ? 'Confirm your email first: click the link in the email we sent you.' : 'Wrong email or password.' };
+        return { user: await startSession(r.data) };
+    },
+
+    async logout() {
+        if (store.get()) await request('/auth/v1/logout', { method: 'POST' });
+        store.set(null);
+        return {};
+    },
+
+    async setSkin({ skin }) {
+        const s = store.get();
+        if (!s) return { error: 'Log in first.' };
+        const r = await request('/rest/v1/profiles?id=eq.' + s.user_id, { method: 'PATCH', body: { skin: skin || null } });
+        return r.ok ? {} : { error: r.error };
+    },
+
+    async players() {
+        const r = await request('/rest/v1/profiles?select=username,skin,is_owner&order=is_owner.desc,username.asc', { auth: false });
+        return { players: r.ok ? r.data : [] };
+    },
+
+    async levels() {
+        const r = await request('/rest/v1/levels?select=id,name,description,visits,created_at,dat_path,thumb_path,profiles(username)&order=created_at.desc', { auth: false });
+        return { levels: r.ok ? r.data.map(l => ({ ...l, thumb_url: publicUrl('thumbs', l.thumb_path) })) : [] };
+    },
+
+    async level({ id }) {
+        if (!/^[0-9a-f-]{36}$/.test(String(id))) return { level: null };
+        const r = await request('/rest/v1/levels?select=id,name,description,visits,dat_path,thumb_path,profiles(username)&id=eq.' + id, { auth: false });
+        return { level: r.ok && r.data[0] ? r.data[0] : null };
+    },
+
+    // a level's .dat, as base64 (the website can't download from the database itself)
+    async levelData({ id }) {
+        const { level } = await ACTIONS.level({ id });
+        if (!level) return { error: 'No such level.' };
+        const r = await request('/storage/v1/object/public/levels/' + level.dat_path, { auth: false, binary: true });
+        return r.ok ? { dat: toBase64(r.data) } : { error: 'That level\'s file couldn\'t be loaded.' };
+    },
+
+    // a thumbnail as a picture the website can show (in case it can't load it directly)
+    async thumb({ path }) {
+        if (!/^[0-9a-f-]+\/[0-9a-f-]+\.(jpg|png)$/.test(String(path))) return { error: 'bad path' };
+        const r = await request('/storage/v1/object/public/thumbs/' + path, { auth: false, binary: true });
+        return r.ok ? { url: 'data:image/' + (path.endsWith('.png') ? 'png' : 'jpeg') + ';base64,' + toBase64(r.data) } : { error: 'not found' };
+    },
+
+    async publish({ name, description, dat, thumb }) {
+        const s = store.get();
+        if (!s) return { error: 'log in to save levels' };
+        const m = /^data:image\/(jpeg|png);base64,(.+)$/.exec(String(thumb || ''));
+        if (!m) return { error: 'no thumbnail' };
+        const id = crypto.randomUUID(), ext = m[1] === 'png' ? 'png' : 'jpg';
+        const datPath = `${s.user_id}/${id}.dat`, thumbPath = `${s.user_id}/${id}.${ext}`;
+        let r = await request('/storage/v1/object/levels/' + datPath, { method: 'POST', body: fromBase64(String(dat)), headers: { 'Content-Type': 'application/octet-stream' } });
+        if (!r.ok) return { error: r.error };
+        r = await request('/storage/v1/object/thumbs/' + thumbPath, { method: 'POST', body: fromBase64(m[2]), headers: { 'Content-Type': 'image/' + m[1] } });
+        if (!r.ok) return { error: r.error };
+        r = await request('/rest/v1/levels', { method: 'POST', headers: { Prefer: 'return=representation' },
+            body: { name: String(name).slice(0, 32), description: String(description || '').slice(0, 100), dat_path: datPath, thumb_path: thumbPath } });
+        return r.ok ? { ok: true, levelId: r.data[0].id } : { error: r.error };
+    },
+
+    async visit({ id }) {
+        let visitor = null;
+        try { visitor = localStorage.getItem('claudecraft-visitor'); if (!visitor) { visitor = crypto.randomUUID(); localStorage.setItem('claudecraft-visitor', visitor); } } catch { visitor = crypto.randomUUID(); }
+        const r = await request('/rest/v1/rpc/count_visit', { method: 'POST', body: { p_level: id, p_visitor: visitor } });
+        return r.ok ? { visits: r.data } : { error: r.error };
+    }
+};
+
+window.addEventListener('message', async e => {
+    if (!ALLOWED_SITES.includes(e.origin)) return;              // only the Claudecraft website
+    const m = e.data;
+    if (!m || m.type !== 'claudecraft-helper' || !ACTIONS[m.action]) return;
+    let out;
+    try { out = await ACTIONS[m.action](m.data || {}); } catch (err) { out = { error: 'Something went wrong: ' + err.message }; }
+    // (the reply's own type and id go last, so nothing in the answer can overwrite them)
+    e.source.postMessage({ ...out, type: 'claudecraft-helper-reply', id: m.id }, e.origin);
+});
+for (const site of ALLOWED_SITES) { try { parent.postMessage({ type: 'claudecraft-helper-ready' }, site); } catch { /* not in a frame */ } }
+</script>
+</body>
+</html>
