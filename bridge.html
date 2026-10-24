@@ -173,6 +173,33 @@ const ACTIONS = {
         return { deleted: true };
     },
 
+    // ---- Claudecraft Chat ----
+    // The latest messages in a section, or only the ones after a message id (for live updates)
+    async chatList({ channel, after }) {
+        if (!['claudecraft', 'offtopic', 'ideas'].includes(channel)) return { error: 'No such section.' };
+        const fields = 'select=id,text,created_at,profiles(username,is_owner)&channel=eq.' + channel;
+        const newer = Number.isInteger(after) && after > 0;
+        const r = await request('/rest/v1/chat_messages?' + fields + (newer ? '&id=gt.' + after + '&order=id.asc&limit=100' : '&order=id.desc&limit=50'), { auth: false });
+        if (!r.ok) return { error: r.error };
+        const list = newer ? r.data : r.data.reverse();          // oldest first
+        return { messages: list.map(m => ({ id: m.id, text: m.text, at: m.created_at,
+            name: m.profiles ? m.profiles.username : '?', owner: !!(m.profiles && m.profiles.is_owner) })) };
+    },
+    async chatSend({ channel, text }) {
+        if (!store.get()) return { error: 'Log in to chat.' };
+        text = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (!text) return { error: 'Type a message first.' };
+        const r = await request('/rest/v1/chat_messages', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: { channel, text } });
+        if (r.ok) return { ok: true };
+        return { error: /slow down/i.test(r.error) ? 'Slow down: one message every 2 seconds.' : r.error };
+    },
+    async chatDelete({ id }) {
+        if (!store.get()) return { error: 'Log in first.' };
+        const r = await request('/rest/v1/chat_messages?id=eq.' + Number(id), { method: 'DELETE', headers: { Prefer: 'return=representation' } });
+        if (!r.ok) return { error: r.error };
+        return r.data && r.data.length ? { ok: true } : { error: 'Only the owner can delete messages.' };
+    },
+
     async visit({ id }) {
         let visitor = null;
         try { visitor = localStorage.getItem('claudecraft-visitor'); if (!visitor) { visitor = crypto.randomUUID(); localStorage.setItem('claudecraft-visitor', visitor); } } catch { visitor = crypto.randomUUID(); }
