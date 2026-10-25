@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+=<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -113,7 +113,8 @@ const ACTIONS = {
     },
 
     async players() {
-        const r = await request('/rest/v1/profiles?select=username,skin,is_owner&order=is_owner.desc,username.asc', { auth: false });
+        // in the order they joined (the first player first), with the day they joined
+        const r = await request('/rest/v1/profiles?select=username,skin,is_owner,created_at&order=created_at.asc', { auth: false });
         return { players: r.ok ? r.data : [] };
     },
 
