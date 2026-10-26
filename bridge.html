@@ -1,4 +1,4 @@
-=<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -199,6 +199,55 @@ const ACTIONS = {
         const r = await request('/rest/v1/chat_messages?id=eq.' + Number(id), { method: 'DELETE', headers: { Prefer: 'return=representation' } });
         if (!r.ok) return { error: r.error };
         return r.data && r.data.length ? { ok: true } : { error: 'Only the owner can delete messages.' };
+    },
+
+    // ---- Claudecraft Forums ----
+    async forumBoards() {
+        // how many threads each board has, and its newest activity
+        const r = await request('/rest/v1/forum_threads?select=category,last_post_at&order=last_post_at.desc&limit=2000', { auth: false });
+        if (!r.ok) return { error: r.error };
+        const boards = {};
+        for (const t of r.data) { const b = boards[t.category] || (boards[t.category] = { threads: 0, last: t.last_post_at }); b.threads++; }
+        return { boards };
+    },
+    async forumThreads({ category }) {
+        if (!/^[a-z]{3,20}$/.test(String(category))) return { error: 'No such board.' };
+        const r = await request('/rest/v1/forum_threads?select=id,title,created_at,last_post_at,posts,profiles(username,is_owner)&category=eq.' + category + '&order=last_post_at.desc&limit=100', { auth: false });
+        return r.ok ? { threads: r.data.map(t => ({ id: t.id, title: t.title, at: t.created_at, last: t.last_post_at, posts: t.posts,
+            name: t.profiles ? t.profiles.username : '?', owner: !!(t.profiles && t.profiles.is_owner) })) } : { error: r.error };
+    },
+    async forumThread({ id }) {
+        id = Number(id); if (!Number.isInteger(id)) return { error: 'No such thread.' };
+        const t = await request('/rest/v1/forum_threads?select=id,title,category,created_at,profiles(username,is_owner)&id=eq.' + id, { auth: false });
+        if (!t.ok || !t.data[0]) return { error: 'That thread doesn\'t exist (it may have been deleted).' };
+        const p = await request('/rest/v1/forum_posts?select=id,text,created_at,profiles(username,is_owner)&thread_id=eq.' + id + '&order=id.asc&limit=500', { auth: false });
+        if (!p.ok) return { error: p.error };
+        const th = t.data[0];
+        return { thread: { id: th.id, title: th.title, category: th.category, name: th.profiles ? th.profiles.username : '?' },
+            posts: p.data.map(x => ({ id: x.id, text: x.text, at: x.created_at, name: x.profiles ? x.profiles.username : '?', owner: !!(x.profiles && x.profiles.is_owner) })) };
+    },
+    async forumNewThread({ category, title, text }) {
+        if (!store.get()) return { error: 'Log in to post.' };
+        title = String(title || '').replace(/\s+/g, ' ').trim().slice(0, 80); text = String(text || '').trim().slice(0, 4000);
+        if (title.length < 3) return { error: 'Give your thread a title (at least 3 characters).' };
+        if (!text) return { error: 'Write something in your first post.' };
+        const t = await request('/rest/v1/forum_threads', { method: 'POST', headers: { Prefer: 'return=representation' }, body: { category, title } });
+        if (!t.ok) return { error: /slow down/i.test(t.error) ? 'Slow down: one new thread a minute.' : /row-level security/i.test(t.error) ? 'Only the owner can post in Announcements.' : t.error };
+        const p = await request('/rest/v1/forum_posts', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: { thread_id: t.data[0].id, text } });
+        return p.ok ? { threadId: t.data[0].id } : { error: p.error };
+    },
+    async forumReply({ thread, text }) {
+        if (!store.get()) return { error: 'Log in to reply.' };
+        text = String(text || '').trim().slice(0, 4000); if (!text) return { error: 'Write something first.' };
+        const r = await request('/rest/v1/forum_posts', { method: 'POST', headers: { Prefer: 'return=minimal' }, body: { thread_id: Number(thread), text } });
+        return r.ok ? { ok: true } : { error: /slow down/i.test(r.error) ? 'Slow down: one post every 15 seconds.' : r.error };
+    },
+    async forumDelete({ kind, id }) {
+        if (!store.get()) return { error: 'Log in first.' };
+        const table = kind === 'thread' ? 'forum_threads' : 'forum_posts';
+        const r = await request('/rest/v1/' + table + '?id=eq.' + Number(id), { method: 'DELETE', headers: { Prefer: 'return=representation' } });
+        if (!r.ok) return { error: r.error };
+        return r.data && r.data.length ? { ok: true } : { error: 'You can only delete your own posts.' };
     },
 
     async visit({ id }) {
