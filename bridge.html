@@ -201,6 +201,18 @@ const ACTIONS = {
         return r.data && r.data.length ? { ok: true } : { error: 'Only the owner can delete messages.' };
     },
 
+    // ---- Statistics: games started ----
+    async gameStarted({ version, multiplayer }) {
+        if (version !== 'claudecraft' && version !== '0.0.11a') return { error: 'Unknown version.' };
+        const r = await request('/rest/v1/game_starts', { method: 'POST', auth: false, headers: { Prefer: 'return=minimal' }, body: { version, multiplayer: !!multiplayer } });
+        return r.ok ? { ok: true } : { error: r.error };
+    },
+    async gameStats() {
+        const r = await request('/rest/v1/rpc/game_start_stats', { method: 'POST', auth: false, body: {} });
+        if (Math.random() < 0.05) request('/rest/v1/rpc/game_starts_tidy', { method: 'POST', auth: false, body: {} });   // now and then: clear old rows
+        return r.ok ? { stats: r.data } : { error: r.error };
+    },
+
     // ---- Claudecraft Forums ----
     async forumBoards() {
         // how many threads each board has, and its newest activity
