@@ -203,7 +203,7 @@ const ACTIONS = {
 
     // ---- Statistics: games started ----
     async gameStarted({ version, multiplayer }) {
-        if (version !== 'claudecraft' && version !== '0.0.11a') return { error: 'Unknown version.' };
+        if (version !== 'claudecraft' && version !== '0.0.11a' && version !== '0.24_st') return { error: 'Unknown version.' };
         const r = await request('/rest/v1/game_starts', { method: 'POST', auth: false, headers: { Prefer: 'return=minimal' }, body: { version, multiplayer: !!multiplayer } });
         return r.ok ? { ok: true } : { error: r.error };
     },
