@@ -270,6 +270,48 @@ const ACTIONS = {
     }
 };
 
+// ---- Survival Test lobbies: Supabase Realtime "broadcast" channels ----
+// One connection to Supabase Realtime (the Phoenix websocket protocol). The website joins a lobby's
+// channel, sends messages on it, and gets everyone else's back here, which are passed on to it.
+const RT = { ws: null, ref: 0, joined: new Map(), queue: [], hb: null };
+function rtRaw(obj) {
+    obj.ref = String(++RT.ref);
+    const s = JSON.stringify(obj);
+    if (RT.ws && RT.ws.readyState === 1) RT.ws.send(s); else RT.queue.push(s);
+}
+function rtJoin(topic) {
+    rtRaw({ topic: 'realtime:' + topic, event: 'phx_join', payload: { config: { broadcast: { self: false, ack: false }, presence: { key: '' }, private: false } } });
+}
+function rtConnect() {
+    if (RT.ws && RT.ws.readyState <= 1) return;
+    const ws = RT.ws = new WebSocket(SUPABASE_URL.replace(/^http/, 'ws') + '/realtime/v1/websocket?apikey=' + encodeURIComponent(SUPABASE_KEY) + '&vsn=1.0.0');
+    ws.onopen = () => {
+        const waiting = RT.queue.splice(0);
+        for (const topic of RT.joined.keys()) rtJoin(topic);       // (joined first, then anything waiting)
+        for (const m of waiting) if (!m.includes('"phx_join"')) ws.send(m);
+    };
+    ws.onmessage = ev => {
+        let m; try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.event !== 'broadcast' || !m.payload || m.payload.event !== 'm') return;
+        const topic = String(m.topic || '').replace(/^realtime:/, ''), j = RT.joined.get(topic);
+        if (j) j.source.postMessage({ type: 'claudecraft-rt-in', topic, payload: m.payload.payload }, j.origin);
+    };
+    ws.onclose = () => { clearInterval(RT.hb); RT.hb = null; if (RT.joined.size) setTimeout(rtConnect, 2000); };
+    clearInterval(RT.hb);
+    RT.hb = setInterval(() => rtRaw({ topic: 'phoenix', event: 'heartbeat', payload: {} }), 25000);
+}
+window.addEventListener('message', e => {
+    if (!ALLOWED_SITES.includes(e.origin)) return;
+    const m = e.data;
+    if (!m || m.type !== 'claudecraft-rt' || !/^cc-lobby-[A-Z0-9]{5}$/.test(String(m.topic))) return;
+    if (m.op === 'join') { RT.joined.set(m.topic, { origin: e.origin, source: e.source }); rtConnect(); rtJoin(m.topic); }
+    else if (m.op === 'leave') { if (RT.joined.delete(m.topic)) rtRaw({ topic: 'realtime:' + m.topic, event: 'phx_leave', payload: {} }); }
+    else if (m.op === 'send' && RT.joined.has(m.topic)) {
+        if (JSON.stringify(m.payload || null).length > 200000) return;   // (too big for one message)
+        rtRaw({ topic: 'realtime:' + m.topic, event: 'broadcast', payload: { type: 'broadcast', event: 'm', payload: m.payload } });
+    }
+});
+
 window.addEventListener('message', async e => {
     if (!ALLOWED_SITES.includes(e.origin)) return;              // only the Claudecraft website
     const m = e.data;
