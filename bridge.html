@@ -213,6 +213,12 @@ const ACTIONS = {
         return r.ok ? { stats: r.data } : { error: r.error };
     },
 
+    // ---- The Servers page: everyone's servers that are online (they check in themselves) ----
+    async servers() {
+        const r = await request('/rest/v1/rpc/list_servers', { method: 'POST', auth: false, body: {} });
+        return r.ok ? { servers: Array.isArray(r.data) ? r.data : [] } : { error: r.error };
+    },
+
     // ---- Claudecraft Forums ----
     async forumBoards() {
         // how many threads each board has, and its newest activity
